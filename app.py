@@ -19,9 +19,6 @@ EXCEL_IMG_H = 380
 LABEL_COL_WIDTH = 22
 LABEL_ROW_HEIGHT = 300
 
-# =========================
-# PATHS
-# =========================
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGO_PATH = os.path.join(APP_DIR, "logo.png")
 
@@ -63,7 +60,6 @@ def make_qr_block(qr_data, building_id, out_png):
             break
         except:
             pass
-
     if font is None:
         font = ImageFont.load_default()
 
@@ -76,22 +72,18 @@ def make_qr_block(qr_data, building_id, out_png):
     canvas.convert("RGB").save(out_png, "PNG")
 
 # =========================
-# STRICT COLUMN DETECTION (FIXED)
+# STRICT: find header row containing Building Code
+# If not found => return None (skip sheet)
 # =========================
-def detect_columns(ws):
-    header_row = None
-
-    # Find header row
-    for r in range(1, 31):
+def find_header_row(ws):
+    for r in range(1, 60):
         row_vals = [str(ws.cell(r, c).value or "").strip().lower()
                     for c in range(1, ws.max_column + 1)]
         if "building code" in row_vals or "building id" in row_vals:
-            header_row = r
-            break
+            return r
+    return None
 
-    if header_row is None:
-        header_row = 1
-
+def detect_columns(ws, header_row):
     headers = {}
     for c in range(1, ws.max_column + 1):
         v = ws.cell(header_row, c).value
@@ -111,24 +103,21 @@ def detect_columns(ws):
                     return v
         return None
 
-    col_building = exact(["building code", "building id"])
-    if col_building is None:
-        col_building = contains(["building code", "building id", "building"])
-    if col_building is None:
-        col_building = 2  # SAFE fallback
+    col_building = exact(["building code", "building id"]) or contains(["building code", "building id"])
+    col_address  = exact(["national address"]) or contains(["national address", "address"])
+    col_qr       = exact(["barcode", "qr"]) or contains(["barcode", "qr"])
 
-    col_address = exact(["national address"])
-    if col_address is None:
-        col_address = contains(["national address", "address"])
+    if col_building is None:
+        return None
+
     if col_address is None:
         col_address = min(col_building + 1, ws.max_column)
 
-    col_qr = exact(["barcode", "qr"])
     if col_qr is None:
         col_qr = ws.max_column + 1
         ws.cell(header_row, col_qr, "Barcode")
 
-    return header_row, col_building, col_address, col_qr
+    return col_building, col_address, col_qr
 
 # =========================
 # LABEL SHEET
@@ -146,6 +135,18 @@ def setup_labels_sheet(wb):
 
     return ws
 
+# Basic validity: avoid picking "City/Region" etc as ID
+def looks_like_building_id(x):
+    s = str(x).strip()
+    if len(s) < 6:
+        return False
+    # Most of your IDs are like D9175... or numeric long
+    if s[0].isalpha() and len(s) >= 8:
+        return True
+    if s.isdigit() and len(s) >= 8:
+        return True
+    return False
+
 # =========================
 # PROCESS ONE FILE
 # =========================
@@ -156,39 +157,60 @@ def process_xlsx(xlsx_bytes, filename):
             f.write(xlsx_bytes)
 
         wb = load_workbook(src)
-        ws = wb.active
-        ws._images = []
 
-        header_row, col_building, col_address, col_qr = detect_columns(ws)
-        qr_col_letter = get_column_letter(col_qr)
-        ws.column_dimensions[qr_col_letter].width = 26
+        # Create fresh LABELS sheet (aggregate from all processed sheets)
+        labels_ws = setup_labels_sheet(wb)
+        all_images = []
 
-        images = []
-
-        for r in range(header_row + 1, ws.max_row + 1):
-            bid = ws.cell(r, col_building).value
-            if not bid:
+        # Process ALL sheets that contain Building Code header
+        for ws in wb.worksheets:
+            if ws.title.strip().upper() == "LABELS":
                 continue
 
-            addr = ws.cell(r, col_address).value
-            qr_data = str(bid)
-            if addr:
-                qr_data += "\n" + str(addr)
+            header_row = find_header_row(ws)
+            if header_row is None:
+                # ✅ Skip non-data sheets (City/Region template sheets)
+                continue
 
-            img_path = os.path.join(td, f"img_{r}.png")
-            make_qr_block(qr_data, bid, img_path)
-            images.append(img_path)
+            cols = detect_columns(ws, header_row)
+            if cols is None:
+                continue
 
-            img = XLImage(img_path)
-            img.width = EXCEL_IMG_W
-            img.height = EXCEL_IMG_H
-            ws.add_image(img, f"{qr_col_letter}{r}")
-            ws.row_dimensions[r].height = 285
+            col_building, col_address, col_qr = cols
 
-        labels_ws = setup_labels_sheet(wb)
+            # clear old images on that sheet
+            try:
+                ws._images = []
+            except:
+                pass
+
+            qr_col_letter = get_column_letter(col_qr)
+            ws.column_dimensions[qr_col_letter].width = 26
+
+            # Generate QR blocks row by row
+            for r in range(header_row + 1, ws.max_row + 1):
+                bid = ws.cell(r, col_building).value
+                if not bid or not looks_like_building_id(bid):
+                    continue
+
+                addr = ws.cell(r, col_address).value
+                qr_data = str(bid).strip()
+                if addr:
+                    qr_data += "\n" + str(addr).strip()
+
+                img_path = os.path.join(td, f"{ws.title}_{r}.png")
+                make_qr_block(qr_data, bid, img_path)
+                all_images.append(img_path)
+
+                img = XLImage(img_path)
+                img.width = EXCEL_IMG_W
+                img.height = EXCEL_IMG_H
+                ws.add_image(img, f"{qr_col_letter}{r}")
+                ws.row_dimensions[r].height = 285
+
+        # Fill LABELS from all_images
         per_page = LABEL_COLS * LABEL_ROWS
-
-        for i, img_path in enumerate(images):
+        for i, img_path in enumerate(all_images):
             page = i // per_page
             pos = i % per_page
             row = page * (LABEL_ROWS + 1) + (pos // LABEL_COLS) + 1
@@ -210,13 +232,9 @@ def process_xlsx(xlsx_bytes, filename):
 # STREAMLIT UI
 # =========================
 st.set_page_config(page_title="QR Excel Generator", layout="centered")
-st.title("QR Code Excel Generator (A4 Labels)")
+st.title("QR Code Excel Generator (Logo + A4 Labels)")
 
-files = st.file_uploader(
-    "Upload Excel files (.xlsx)",
-    type=["xlsx"],
-    accept_multiple_files=True,
-)
+files = st.file_uploader("Upload Excel files (.xlsx)", type=["xlsx"], accept_multiple_files=True)
 
 if files:
     if st.button("Generate"):
