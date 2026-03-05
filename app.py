@@ -6,7 +6,7 @@ import streamlit as st
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.utils import get_column_letter
-from PIL import Image, ImageDraw, ImageFont, ImageChops
+from PIL import Image, ImageDraw, ImageFont
 import qrcode
 
 # =========================
@@ -14,59 +14,20 @@ import qrcode
 # =========================
 LABEL_COLS = 3
 LABEL_ROWS = 7
-
-# ✅ Bigger Excel image so logo text stays large
-EXCEL_IMG_W = 260
-EXCEL_IMG_H = 460
-
-# LABELS grid sizing
-LABEL_COL_WIDTH = 23
-LABEL_ROW_HEIGHT = 360
+EXCEL_IMG_W = 240
+EXCEL_IMG_H = 380
+LABEL_COL_WIDTH = 22
+LABEL_ROW_HEIGHT = 300
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGO_PATH = os.path.join(APP_DIR, "logo.png")
 
-
 # =========================
-# LOGO TRIM (IMPORTANT FIX)
-# =========================
-def trim_logo_whitespace(im: Image.Image) -> Image.Image:
-    """
-    Trim white/transparent margins from the logo so the internal text/logo becomes bigger when resized.
-    """
-    if im.mode != "RGBA":
-        im = im.convert("RGBA")
-
-    # Create white background to handle transparency
-    white_bg = Image.new("RGBA", im.size, (255, 255, 255, 255))
-    merged = Image.alpha_composite(white_bg, im).convert("RGB")
-
-    # Find bounding box of non-white area
-    diff = ImageChops.difference(merged, Image.new("RGB", merged.size, (255, 255, 255)))
-    bbox = diff.getbbox()
-
-    if bbox:
-        # Add small padding so logo isn't too tight
-        pad = 6
-        x0, y0, x1, y1 = bbox
-        x0 = max(0, x0 - pad)
-        y0 = max(0, y0 - pad)
-        x1 = min(im.size[0], x1 + pad)
-        y1 = min(im.size[1], y1 + pad)
-        return im.crop((x0, y0, x1, y1))
-
-    return im
-
-
-# =========================
-# IMAGE CREATION (BIGGER LOGO + QR + ORANGE ID)
+# IMAGE CREATION
 # =========================
 def make_qr_block(qr_data, building_id, out_png):
-    # Load + trim logo whitespace
     logo = Image.open(LOGO_PATH).convert("RGBA")
-    logo = trim_logo_whitespace(logo)
 
-    # Create QR
     qr = qrcode.QRCode(
         error_correction=qrcode.constants.ERROR_CORRECT_M,
         box_size=10,
@@ -78,24 +39,13 @@ def make_qr_block(qr_data, building_id, out_png):
     qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGBA")
     qr_img = qr_img.resize((260, 260), Image.NEAREST)
 
-    # ✅ Resize logo to a bigger target area (after trimming it works perfectly)
-    MAX_LOGO_W = 300
-    MAX_LOGO_H = 180
-    scale = min(MAX_LOGO_W / logo.width, MAX_LOGO_H / logo.height)
+    scale = min(260 / logo.width, 90 / logo.height)
     logo = logo.resize((int(logo.width * scale), int(logo.height * scale)), Image.LANCZOS)
 
-    # ✅ Canvas bigger so logo + QR + text fit nicely
-    canvas_w, canvas_h = 320, 520
-    canvas = Image.new("RGBA", (canvas_w, canvas_h), "white")
+    canvas = Image.new("RGBA", (300, 420), "white")
+    canvas.paste(logo, ((300 - logo.width) // 2, 10), logo)
+    canvas.paste(qr_img, ((300 - 260) // 2, 10 + logo.height + 10), qr_img)
 
-    # Paste logo (top center)
-    canvas.paste(logo, ((canvas_w - logo.width) // 2, 10), logo)
-
-    # Paste QR below logo
-    qr_y = 10 + logo.height + 12
-    canvas.paste(qr_img, ((canvas_w - 260) // 2, qr_y), qr_img)
-
-    # Draw Building ID (orange) at bottom
     draw = ImageDraw.Draw(canvas)
     orange = (255, 140, 0)
 
@@ -113,29 +63,25 @@ def make_qr_block(qr_data, building_id, out_png):
     if font is None:
         font = ImageFont.load_default()
 
-    text = str(building_id).strip()
+    text = str(building_id)
     bbox = draw.textbbox((0, 0), text, font=font)
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
-    draw.text(((canvas_w - tw) // 2, canvas_h - th - 18), text, fill=orange, font=font)
+    draw.text(((300 - tw) // 2, 420 - th - 20), text, fill=orange, font=font)
 
     canvas.convert("RGB").save(out_png, "PNG")
 
-
 # =========================
 # STRICT: find header row containing Building Code
-# If not found => skip sheet
+# If not found => return None (skip sheet)
 # =========================
 def find_header_row(ws):
     for r in range(1, 60):
-        row_vals = [
-            str(ws.cell(r, c).value or "").strip().lower()
-            for c in range(1, ws.max_column + 1)
-        ]
+        row_vals = [str(ws.cell(r, c).value or "").strip().lower()
+                    for c in range(1, ws.max_column + 1)]
         if "building code" in row_vals or "building id" in row_vals:
             return r
     return None
-
 
 def detect_columns(ws, header_row):
     headers = {}
@@ -158,8 +104,8 @@ def detect_columns(ws, header_row):
         return None
 
     col_building = exact(["building code", "building id"]) or contains(["building code", "building id"])
-    col_address = exact(["national address"]) or contains(["national address", "address"])
-    col_qr = exact(["barcode", "qr"]) or contains(["barcode", "qr"])
+    col_address  = exact(["national address"]) or contains(["national address", "address"])
+    col_qr       = exact(["barcode", "qr"]) or contains(["barcode", "qr"])
 
     if col_building is None:
         return None
@@ -173,7 +119,9 @@ def detect_columns(ws, header_row):
 
     return col_building, col_address, col_qr
 
-
+# =========================
+# LABEL SHEET
+# =========================
 def setup_labels_sheet(wb):
     if "LABELS" in wb.sheetnames:
         del wb["LABELS"]
@@ -187,17 +135,17 @@ def setup_labels_sheet(wb):
 
     return ws
 
-
+# Basic validity: avoid picking "City/Region" etc as ID
 def looks_like_building_id(x):
     s = str(x).strip()
     if len(s) < 6:
         return False
+    # Most of your IDs are like D9175... or numeric long
     if s[0].isalpha() and len(s) >= 8:
         return True
     if s.isdigit() and len(s) >= 8:
         return True
     return False
-
 
 # =========================
 # PROCESS ONE FILE
@@ -210,15 +158,18 @@ def process_xlsx(xlsx_bytes, filename):
 
         wb = load_workbook(src)
 
+        # Create fresh LABELS sheet (aggregate from all processed sheets)
         labels_ws = setup_labels_sheet(wb)
         all_images = []
 
+        # Process ALL sheets that contain Building Code header
         for ws in wb.worksheets:
             if ws.title.strip().upper() == "LABELS":
                 continue
 
             header_row = find_header_row(ws)
             if header_row is None:
+                # ✅ Skip non-data sheets (City/Region template sheets)
                 continue
 
             cols = detect_columns(ws, header_row)
@@ -227,14 +178,16 @@ def process_xlsx(xlsx_bytes, filename):
 
             col_building, col_address, col_qr = cols
 
+            # clear old images on that sheet
             try:
                 ws._images = []
             except:
                 pass
 
             qr_col_letter = get_column_letter(col_qr)
-            ws.column_dimensions[qr_col_letter].width = 28
+            ws.column_dimensions[qr_col_letter].width = 26
 
+            # Generate QR blocks row by row
             for r in range(header_row + 1, ws.max_row + 1):
                 bid = ws.cell(r, col_building).value
                 if not bid or not looks_like_building_id(bid):
@@ -253,8 +206,9 @@ def process_xlsx(xlsx_bytes, filename):
                 img.width = EXCEL_IMG_W
                 img.height = EXCEL_IMG_H
                 ws.add_image(img, f"{qr_col_letter}{r}")
-                ws.row_dimensions[r].height = 360  # ✅ taller row for bigger image
+                ws.row_dimensions[r].height = 285
 
+        # Fill LABELS from all_images
         per_page = LABEL_COLS * LABEL_ROWS
         for i, img_path in enumerate(all_images):
             page = i // per_page
@@ -273,7 +227,6 @@ def process_xlsx(xlsx_bytes, filename):
         out = io.BytesIO()
         wb.save(out)
         return out.getvalue()
-
 
 # =========================
 # STREAMLIT UI
