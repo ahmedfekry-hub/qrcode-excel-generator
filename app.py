@@ -6,7 +6,7 @@ import streamlit as st
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.utils import get_column_letter
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageChops
 import qrcode
 
 # =========================
@@ -15,24 +15,58 @@ import qrcode
 LABEL_COLS = 3
 LABEL_ROWS = 7
 
-# Excel inserted image size (px)  ✅ increased height to fit bigger logo
-EXCEL_IMG_W = 240
-EXCEL_IMG_H = 420
+# ✅ Bigger Excel image so logo text stays large
+EXCEL_IMG_W = 260
+EXCEL_IMG_H = 460
 
 # LABELS grid sizing
-LABEL_COL_WIDTH = 22
-LABEL_ROW_HEIGHT = 330
+LABEL_COL_WIDTH = 23
+LABEL_ROW_HEIGHT = 360
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGO_PATH = os.path.join(APP_DIR, "logo.png")
 
 
 # =========================
-# IMAGE CREATION (BIGGER LOGO)
+# LOGO TRIM (IMPORTANT FIX)
+# =========================
+def trim_logo_whitespace(im: Image.Image) -> Image.Image:
+    """
+    Trim white/transparent margins from the logo so the internal text/logo becomes bigger when resized.
+    """
+    if im.mode != "RGBA":
+        im = im.convert("RGBA")
+
+    # Create white background to handle transparency
+    white_bg = Image.new("RGBA", im.size, (255, 255, 255, 255))
+    merged = Image.alpha_composite(white_bg, im).convert("RGB")
+
+    # Find bounding box of non-white area
+    diff = ImageChops.difference(merged, Image.new("RGB", merged.size, (255, 255, 255)))
+    bbox = diff.getbbox()
+
+    if bbox:
+        # Add small padding so logo isn't too tight
+        pad = 6
+        x0, y0, x1, y1 = bbox
+        x0 = max(0, x0 - pad)
+        y0 = max(0, y0 - pad)
+        x1 = min(im.size[0], x1 + pad)
+        y1 = min(im.size[1], y1 + pad)
+        return im.crop((x0, y0, x1, y1))
+
+    return im
+
+
+# =========================
+# IMAGE CREATION (BIGGER LOGO + QR + ORANGE ID)
 # =========================
 def make_qr_block(qr_data, building_id, out_png):
+    # Load + trim logo whitespace
     logo = Image.open(LOGO_PATH).convert("RGBA")
+    logo = trim_logo_whitespace(logo)
 
+    # Create QR
     qr = qrcode.QRCode(
         error_correction=qrcode.constants.ERROR_CORRECT_M,
         box_size=10,
@@ -44,23 +78,24 @@ def make_qr_block(qr_data, building_id, out_png):
     qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGBA")
     qr_img = qr_img.resize((260, 260), Image.NEAREST)
 
-    # ✅ Make logo bigger to keep text readable
-    MAX_LOGO_W = 280
-    MAX_LOGO_H = 140  # was small; increased so logo font isn't tiny
+    # ✅ Resize logo to a bigger target area (after trimming it works perfectly)
+    MAX_LOGO_W = 300
+    MAX_LOGO_H = 180
     scale = min(MAX_LOGO_W / logo.width, MAX_LOGO_H / logo.height)
     logo = logo.resize((int(logo.width * scale), int(logo.height * scale)), Image.LANCZOS)
 
-    # ✅ Taller canvas to fit bigger logo + QR + orange ID
-    canvas = Image.new("RGBA", (300, 460), "white")
+    # ✅ Canvas bigger so logo + QR + text fit nicely
+    canvas_w, canvas_h = 320, 520
+    canvas = Image.new("RGBA", (canvas_w, canvas_h), "white")
 
     # Paste logo (top center)
-    canvas.paste(logo, ((300 - logo.width) // 2, 10), logo)
+    canvas.paste(logo, ((canvas_w - logo.width) // 2, 10), logo)
 
     # Paste QR below logo
-    qr_y = 10 + logo.height + 10
-    canvas.paste(qr_img, ((300 - 260) // 2, qr_y), qr_img)
+    qr_y = 10 + logo.height + 12
+    canvas.paste(qr_img, ((canvas_w - 260) // 2, qr_y), qr_img)
 
-    # Building ID in orange
+    # Draw Building ID (orange) at bottom
     draw = ImageDraw.Draw(canvas)
     orange = (255, 140, 0)
 
@@ -82,19 +117,21 @@ def make_qr_block(qr_data, building_id, out_png):
     bbox = draw.textbbox((0, 0), text, font=font)
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
-    draw.text(((300 - tw) // 2, 460 - th - 18), text, fill=orange, font=font)
+    draw.text(((canvas_w - tw) // 2, canvas_h - th - 18), text, fill=orange, font=font)
 
     canvas.convert("RGB").save(out_png, "PNG")
 
 
 # =========================
 # STRICT: find header row containing Building Code
-# If not found => return None (skip sheet)
+# If not found => skip sheet
 # =========================
 def find_header_row(ws):
     for r in range(1, 60):
-        row_vals = [str(ws.cell(r, c).value or "").strip().lower()
-                    for c in range(1, ws.max_column + 1)]
+        row_vals = [
+            str(ws.cell(r, c).value or "").strip().lower()
+            for c in range(1, ws.max_column + 1)
+        ]
         if "building code" in row_vals or "building id" in row_vals:
             return r
     return None
@@ -173,11 +210,9 @@ def process_xlsx(xlsx_bytes, filename):
 
         wb = load_workbook(src)
 
-        # Create fresh LABELS sheet (aggregate)
         labels_ws = setup_labels_sheet(wb)
         all_images = []
 
-        # Process ALL sheets that contain Building Code header
         for ws in wb.worksheets:
             if ws.title.strip().upper() == "LABELS":
                 continue
@@ -192,14 +227,13 @@ def process_xlsx(xlsx_bytes, filename):
 
             col_building, col_address, col_qr = cols
 
-            # clear old images
             try:
                 ws._images = []
             except:
                 pass
 
             qr_col_letter = get_column_letter(col_qr)
-            ws.column_dimensions[qr_col_letter].width = 26
+            ws.column_dimensions[qr_col_letter].width = 28
 
             for r in range(header_row + 1, ws.max_row + 1):
                 bid = ws.cell(r, col_building).value
@@ -219,9 +253,8 @@ def process_xlsx(xlsx_bytes, filename):
                 img.width = EXCEL_IMG_W
                 img.height = EXCEL_IMG_H
                 ws.add_image(img, f"{qr_col_letter}{r}")
-                ws.row_dimensions[r].height = 310  # increased to fit taller image
+                ws.row_dimensions[r].height = 360  # ✅ taller row for bigger image
 
-        # Fill LABELS from all_images
         per_page = LABEL_COLS * LABEL_ROWS
         for i, img_path in enumerate(all_images):
             page = i // per_page
